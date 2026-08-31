@@ -10,6 +10,12 @@ defmodule SpyGameServerWeb.Endpoint do
     signing_salt: "UZT2lnLh",
     same_site: "Lax"
   ]
+  socket "/socket", SpyGameServerWeb.UserSocket,
+    websocket: [
+      connect_info: [session: @session_options],
+      compress: false  # Ensure compression is set to false
+    ],
+    longpoll: false
 
   socket "/live", Phoenix.LiveView.Socket,
     websocket: [connect_info: [session: @session_options]],

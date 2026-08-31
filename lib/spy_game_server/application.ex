@@ -9,9 +9,10 @@ defmodule SpyGameServer.Application do
   def start(_type, _args) do
     children = [
       SpyGameServerWeb.Telemetry,
-      SpyGameServer.Repo,
+      #SpyGameServer.Repo,
       {DNSCluster, query: Application.get_env(:spy_game_server, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: SpyGameServer.PubSub},
+      SpyGameServer.RoomTracker,
       # Start a worker by calling: SpyGameServer.Worker.start_link(arg)
       # {SpyGameServer.Worker, arg},
       # Start to serve requests, typically the last entry
