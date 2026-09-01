@@ -2,7 +2,8 @@ defmodule SpyGameServerWeb.UserSocket do
   use Phoenix.Socket
   channel "drawful:*", SpyGameServerWeb.DrawfulChannel
   channel "lobby:*", SpyGameServerWeb.LobbyChannel
-  channel "room:*", SpyGameServerWeb.GameChannel
+  channel "spyword:*", SpyGameServerWeb.GameChannel
+  channel "fibbage:*", SpyGameServerWeb.FibbageChannel
   @impl true
   def connect(_params, socket, _connect_info) do
     # Assign a dummy or parsed user id so assigns never crashes

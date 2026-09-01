@@ -67,7 +67,8 @@ defmodule SpyGameServerWeb.FibbageChannel do
           currentAnswer: nil,
           answers: %{},
           votes: %{},
-          scores: Enum.into(room.members, %{}, fn id -> {id, 0} end)
+          scores: Enum.into(room.members, %{}, fn id -> {id, 0} end),
+          roundRunnerPid: nil
         }
 
         RoomTracker.set_game_data(room_code, game_data)
@@ -79,19 +80,25 @@ defmodule SpyGameServerWeb.FibbageChannel do
 
   @impl true
   def handle_in("submit_answer", %{"text" => text}, socket) do
-    RoomTracker.update_game_data(socket.assigns.room_code, fn gd ->
+    room_code = socket.assigns.room_code
+
+    RoomTracker.update_game_data(room_code, fn gd ->
       if gd != nil do
         %{gd | answers: Map.put(gd.answers, socket.assigns.user_id, text)}
       else
         gd
       end
     end)
+
+    notify_progress(room_code, :answers)
     {:reply, :ok, socket}
   end
 
   @impl true
   def handle_in("submit_guess_vote", %{"targetOwnerId" => target_id}, socket) do
-    RoomTracker.update_game_data(socket.assigns.room_code, fn gd ->
+    room_code = socket.assigns.room_code
+
+    RoomTracker.update_game_data(room_code, fn gd ->
       # Can't vote for your own submitted lie. TRUTH and other players' lies are fair game.
       if gd != nil and socket.assigns.user_id != target_id do
         %{gd | votes: Map.put(gd.votes, socket.assigns.user_id, target_id)}
@@ -99,6 +106,8 @@ defmodule SpyGameServerWeb.FibbageChannel do
         gd
       end
     end)
+
+    notify_progress(room_code, :votes)
     {:reply, :ok, socket}
   end
 
@@ -124,9 +133,52 @@ defmodule SpyGameServerWeb.FibbageChannel do
     end
   end
 
+  # --- Early-completion waiting ---
+
+  # Pings the round runner process every time someone submits, so it can wake up
+  # early instead of always sleeping the full phase duration.
+  defp notify_progress(room_code, field) do
+    case RoomTracker.get_room(room_code) do
+      %{gameData: gd} when gd != nil ->
+        count = gd |> Map.get(field) |> map_size()
+        if gd.roundRunnerPid, do: send(gd.roundRunnerPid, {:submission_progress, count})
+
+      _ ->
+        :ok
+    end
+  end
+
+  # Blocks until `expected_count` submissions have arrived, or `timeout_ms` elapses —
+  # whichever comes first. Recomputes the remaining budget on every message instead
+  # of resetting the "after" clock, so a stream of early-but-incomplete submissions
+  # can't accidentally extend the wait past the original duration.
+  defp wait_until_all_submitted(expected_count, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    wait_loop(expected_count, deadline)
+  end
+
+  defp wait_loop(expected_count, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      :timeout
+    else
+      receive do
+        {:submission_progress, count} when count >= expected_count ->
+          :all_submitted
+
+        {:submission_progress, _count} ->
+          wait_loop(expected_count, deadline)
+      after
+        remaining -> :timeout
+      end
+    end
+  end
+
   # --- Game flow ---
 
   defp run_game_flow(room_code) do
+    RoomTracker.update_game_data(room_code, fn gd -> %{gd | roundRunnerPid: self()} end)
     room = RoomTracker.get_room(room_code)
     run_round(room_code, room.gameData.questions, 0)
   end
@@ -138,6 +190,8 @@ defmodule SpyGameServerWeb.FibbageChannel do
       %{gd | currentRoundIndex: index, currentQuestion: q.question, currentAnswer: q.answer, answers: %{}, votes: %{}}
     end)
 
+    room = RoomTracker.get_room(room_code)
+
     SpyGameServerWeb.Endpoint.broadcast("fibbage:#{room_code}", "question_phase_start", %{
       question: q.question,
       duration: @answer_duration,
@@ -145,8 +199,7 @@ defmodule SpyGameServerWeb.FibbageChannel do
       totalRounds: length(questions)
     })
 
-    # Buffer beyond the client countdown so late answers still land.
-    Process.sleep((@answer_duration + 1) * 1000)
+    wait_until_all_submitted(length(room.members), (@answer_duration + 1) * 1000)
 
     room = RoomTracker.get_room(room_code)
     gd = room.gameData
@@ -161,7 +214,7 @@ defmodule SpyGameServerWeb.FibbageChannel do
       duration: @vote_duration
     })
 
-    Process.sleep((@vote_duration + 1) * 1000)
+    wait_until_all_submitted(length(room.members), (@vote_duration + 1) * 1000)
 
     room2 = RoomTracker.get_room(room_code)
     reveal_and_score(room_code, room2, room2.gameData, choices)
@@ -196,8 +249,6 @@ defmodule SpyGameServerWeb.FibbageChannel do
         Map.update(acc, target, [name], &(&1 ++ [name]))
       end)
 
-    # Skip zero-vote answers entirely, reveal least -> most voted, TRUTH lands last since
-    # it's usually (though not always) the most-picked answer.
     choices
     |> Enum.filter(fn c -> Map.get(vote_counts, c.ownerId, 0) > 0 end)
     |> Enum.sort_by(fn c -> Map.get(vote_counts, c.ownerId, 0) end)

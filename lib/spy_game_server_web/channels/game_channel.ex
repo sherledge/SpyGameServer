@@ -3,118 +3,95 @@ defmodule SpyGameServerWeb.GameChannel do
   alias SpyGameServer.RoomTracker
 
   @impl true
-  def join("room:" <> room_code, _payload, socket) do
+  def join("spyword:" <> room_code, _payload, socket) do
     case RoomTracker.get_room(room_code) do
       nil ->
         {:error, %{reason: "Room does not exist!"}}
 
       _room ->
         user_id = socket.assigns.user_id
-        Phoenix.PubSub.subscribe(SpyGameServer.PubSub, "room:#{room_code}:#{user_id}")
+        Phoenix.PubSub.subscribe(SpyGameServer.PubSub, "spyword:#{room_code}:#{user_id}")
         socket = assign(socket, :room_code, room_code)
         send(self(), :after_join)
         {:ok, socket}
     end
   end
 
-    @impl true
-    def handle_info(:after_join, socket) do
+  @impl true
+  def handle_info(:after_join, socket) do
     case RoomTracker.get_room(socket.assigns.room_code) do
-        nil ->
+      nil ->
         {:noreply, socket}
 
-        room ->
-        # FIX: Wrap the list inside a map key "players"
+      room ->
         push(socket, "room_players_updated", %{players: player_list(room)})
         {:noreply, socket}
     end
-    end
+  end
 
   def handle_info({:personal, event, payload}, socket) do
     push(socket, event, payload)
     {:noreply, socket}
   end
 
-    @impl true
-    def handle_in("start_game", _payload, socket) do
+  @impl true
+  def handle_in("start_game", _payload, socket) do
     room_code = socket.assigns.room_code
     room = RoomTracker.get_room(room_code)
 
     cond do
-        room == nil ->
+      room == nil ->
         {:reply, {:error, %{reason: "Room does not exist!"}}, socket}
 
-        length(room.members) < 3 ->
+      length(room.members) < 3 ->
         {:reply, {:error, %{reason: "Minimum 3 players required!"}}, socket}
 
-        true ->
+      true ->
         spy_id = Enum.random(room.members)
-
-        # Dynamically select a random word from priv/words.json
         word = select_random_word()
-
         vivox_chan = "vivox_" <> String.downcase(room_code)
 
         game_data = %{
-            spy: spy_id,
-            word: word,
-            turnsOrder: room.members,
-            currentTurnIndex: 0,
-            votes: %{},
-            votedCount: 0
+          spy: spy_id,
+          word: word,
+          turnsOrder: room.members,
+          currentTurnIndex: 0,
+          votes: %{},
+          votedCount: 0
         }
 
         RoomTracker.set_game_data(room_code, game_data)
 
         Enum.each(room.members, fn member_id ->
-            is_spy = member_id == spy_id
+          is_spy = member_id == spy_id
 
-            payload = %{
+          payload = %{
             role: if(is_spy, do: "Varathan", else: "Nattukar"),
             word: if(is_spy, do: "", else: word),
             playerName: Map.get(room.playerNames, member_id, "Player"),
             vivoxChannel: vivox_chan
-            }
+          }
 
-            Phoenix.PubSub.broadcast(
+          Phoenix.PubSub.broadcast(
             SpyGameServer.PubSub,
-            "room:#{room_code}:#{member_id}",
+            "spyword:#{room_code}:#{member_id}",
             {:personal, "game_started_init", payload}
-            )
+          )
         end)
 
         Task.start(fn -> run_game_flow(room_code) end)
         {:reply, :ok, socket}
     end
-    end
+  end
 
-    # Add this helper function at the bottom of your module file
-    defp select_random_word do
-    # NOTE: Replace :spy_game_server with your actual OTP app name in mix.exs
-    path = Application.app_dir(:spy_game_server, "priv/words.json")
-
-    case File.read(path) do
-        {:ok, body} ->
-        case Jason.decode(body) do
-            {:ok, words} when is_list(words) and length(words) > 0 ->
-            Enum.random(words)
-
-            _ ->
-            "Apple" # Fallback if JSON is empty or malformed
-        end
-
-        {:error, _reason} ->
-        "Apple" # Fallback if file cannot be read
-    end
-    end
-    @impl true
-    def handle_in("player_speaking_changed", %{"isSpeaking" => is_speaking}, socket) do
-    SpyGameServerWeb.Endpoint.broadcast("room:#{socket.assigns.room_code}", "player_speaking_updated", %{
-        playerId: socket.assigns.user_id,
-        isSpeaking: is_speaking
+  @impl true
+  def handle_in("player_speaking_changed", %{"isSpeaking" => is_speaking}, socket) do
+    SpyGameServerWeb.Endpoint.broadcast("spyword:#{socket.assigns.room_code}", "player_speaking_updated", %{
+      playerId: socket.assigns.user_id,
+      isSpeaking: is_speaking
     })
     {:noreply, socket}
-    end
+  end
 
   @impl true
   def handle_in("submit_vote", %{"targetId" => target_id}, socket) do
@@ -132,18 +109,37 @@ defmodule SpyGameServerWeb.GameChannel do
     end
   end
 
-    @impl true
-    def handle_in("request_room_sync", _payload, socket) do
+  @impl true
+  def handle_in("request_room_sync", _payload, socket) do
     case RoomTracker.get_room(socket.assigns.room_code) do
-        nil ->
+      nil ->
         {:noreply, socket}
 
-        room ->
-        # FIX: Wrap the list inside a map key "players"
+      room ->
         push(socket, "room_players_updated", %{players: player_list(room)})
         {:noreply, socket}
     end
+  end
+
+  # --- Private helpers ---
+
+  defp select_random_word do
+    path = Application.app_dir(:spy_game_server, "priv/words.json")
+
+    case File.read(path) do
+      {:ok, body} ->
+        case Jason.decode(body) do
+          {:ok, words} when is_list(words) and length(words) > 0 ->
+            Enum.random(words)
+
+          _ ->
+            "Apple"
+        end
+
+      {:error, _reason} ->
+        "Apple"
     end
+  end
 
   defp player_list(room) do
     Enum.map(room.members, fn id -> %{id: id, name: Map.get(room.playerNames, id, "Player")} end)
@@ -151,6 +147,7 @@ defmodule SpyGameServerWeb.GameChannel do
 
   defp run_game_flow(room_code) do
     Process.sleep(2000)
+
     case RoomTracker.get_room(room_code) do
       %{gameData: %{turnsOrder: turns}} -> run_turns(room_code, turns, 0)
       _ -> :ok
@@ -162,8 +159,10 @@ defmodule SpyGameServerWeb.GameChannel do
     speaker_id = Enum.at(turns_order, index)
     speaker_name = if room, do: Map.get(room.playerNames, speaker_id, "Player"), else: "Player"
 
-    SpyGameServerWeb.Endpoint.broadcast("room:#{room_code}", "turn_changed", %{
-      speakerId: speaker_id, speakerName: speaker_name, duration: 15
+    SpyGameServerWeb.Endpoint.broadcast("spyword:#{room_code}", "turn_changed", %{
+      speakerId: speaker_id,
+      speakerName: speaker_name,
+      duration: 15
     })
 
     Process.sleep(15500)
@@ -171,9 +170,9 @@ defmodule SpyGameServerWeb.GameChannel do
   end
 
   defp run_turns(room_code, _turns_order, _index) do
-    SpyGameServerWeb.Endpoint.broadcast("room:#{room_code}", "discussion_phase_start", %{duration: 60})
+    SpyGameServerWeb.Endpoint.broadcast("spyword:#{room_code}", "discussion_phase_start", %{duration: 60})
     Process.sleep(60_000)
-    SpyGameServerWeb.Endpoint.broadcast("room:#{room_code}", "voting_phase_start", %{})
+    SpyGameServerWeb.Endpoint.broadcast("spyword:#{room_code}", "voting_phase_start", %{})
   end
 
   defp evaluate_votes(room_code, room, game_data) do
@@ -187,6 +186,7 @@ defmodule SpyGameServerWeb.GameChannel do
       end)
 
     spy_name = Map.get(room.playerNames, game_data.spy, "Spy")
+
     citizen_names =
       room.members
       |> Enum.reject(&(&1 == game_data.spy))
@@ -206,11 +206,16 @@ defmodule SpyGameServerWeb.GameChannel do
           {"Spy was caught! Spy was #{spy_name}.", citizen_names}
       end
 
-    SpyGameServerWeb.Endpoint.broadcast("room:#{room_code}", "game_over", %{
-      message: message, winners: winners, spyName: spy_name
+    SpyGameServerWeb.Endpoint.broadcast("spyword:#{room_code}", "game_over", %{
+      message: message,
+      winners: winners,
+      spyName: spy_name
     })
 
     RoomTracker.delete_room(room_code)
-    SpyGameServerWeb.Endpoint.broadcast("lobby:#{room.gameId}", "update_room_list", %{rooms: RoomTracker.get_all(room.gameId)})
+
+    SpyGameServerWeb.Endpoint.broadcast("lobby:#{room.gameId}", "update_room_list", %{
+      rooms: RoomTracker.get_all(room.gameId)
+    })
   end
 end
